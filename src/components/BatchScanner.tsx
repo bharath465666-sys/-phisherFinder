@@ -45,6 +45,9 @@ http://chase-bank-verify-alert.cfd`;
       const data = await response.json();
       if (data.results) {
         setBatchResults(data.results);
+        if (data.errors?.length) {
+          setError(data.errors.map((item: { url: string; message: string }) => `${item.url}: ${item.message}`).join(" | "));
+        }
       } else {
         setError(data.error || "Batch scan encountered an issue.");
       }

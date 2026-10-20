@@ -4,6 +4,7 @@ import dns from "dns/promises";
 import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { createXaiExplanation, verdictForScore, type RiskContribution } from "./src/explanations";
 
 dotenv.config();
 
@@ -182,13 +183,18 @@ async function analyzeUrlLocally(rawInput: string) {
   }> = [];
 
   let threatScore = 0;
+  const riskContributions: RiskContribution[] = [];
+  const addRiskContribution = (feature: string, points: number, evidence: string) => {
+    threatScore += points;
+    riskContributions.push({ feature, points, evidence });
+  };
   let targetedBrand: string | null = null;
   let threatType = "Clean Webpage";
 
   // 1. IP Hostname Check
   const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
   if (isIp) {
-    threatScore += 35;
+    addRiskContribution("Raw IP address", 35, "The hostname is an IPv4 address rather than a registered domain.");
     indicators.push({
       category: "Network & Structure",
       name: "Raw IP Address Hostname",
@@ -210,7 +216,7 @@ async function analyzeUrlLocally(rawInput: string) {
   // 2. Homograph / Punycode
   const homograph = detectHomographs(parsed.hostname);
   if (homograph.hasHomograph) {
-    threatScore += 50;
+    addRiskContribution("Homograph / lookalike characters", 50, homograph.explanation || "Lookalike or punycode characters were detected in the hostname.");
     indicators.push({
       category: "Domain Legitimacy",
       name: "Homograph / Lookalike Attack",
@@ -234,7 +240,7 @@ async function analyzeUrlLocally(rawInput: string) {
   const tld = tldParts[tldParts.length - 1];
   const isHighRiskTld = HIGH_RISK_TLDS.has(tld);
   if (isHighRiskTld) {
-    threatScore += 25;
+    addRiskContribution("High-abuse top-level domain", 25, `The hostname uses the .${tld} top-level domain.`);
     indicators.push({
       category: "Domain Legitimacy",
       name: "High-Abuse Top Level Domain",
@@ -256,7 +262,7 @@ async function analyzeUrlLocally(rawInput: string) {
   const subdomains = tldParts.slice(0, -2);
   const subdomainCount = subdomains.length;
   if (subdomainCount >= 3) {
-    threatScore += 20;
+    addRiskContribution("Excessive subdomain depth", 20, `The hostname has ${subdomainCount} subdomains.`);
     indicators.push({
       category: "Network & Structure",
       name: "Excessive Subdomain Stacking",
@@ -286,7 +292,7 @@ async function analyzeUrlLocally(rawInput: string) {
     // Check if brand name is in subdomains or second-level domain or path
     const matchesAlias = brand.aliases.some((alias) => hostname.includes(alias) || pathname.includes(alias));
     if (matchesAlias) {
-      threatScore += 45;
+      addRiskContribution("Unauthorized brand reference", 45, `The URL references ${brand.name} but is not hosted on its official domain.`);
       targetedBrand = brand.name;
       threatType = `Brand Impersonation (${brand.name})`;
       indicators.push({
@@ -304,7 +310,7 @@ async function analyzeUrlLocally(rawInput: string) {
     if (secondLevelDomain && secondLevelDomain !== brandCore && secondLevelDomain.length >= 4) {
       const dist = levenshteinDistance(secondLevelDomain, brandCore);
       if (dist === 1 || (dist === 2 && secondLevelDomain.length > 5)) {
-        threatScore += 40;
+        addRiskContribution("Brand typosquatting", 40, `The registered-name portion closely resembles ${brand.name} (edit distance ${dist}).`);
         targetedBrand = brand.name;
         threatType = `Typosquatting (${brand.name} lookalike)`;
         indicators.push({
@@ -329,7 +335,7 @@ async function analyzeUrlLocally(rawInput: string) {
   }
 
   if (keywordsFound.length >= 2) {
-    threatScore += 25;
+    addRiskContribution("Suspicious URL keywords", 25, `${keywordsFound.length} suspicious keyword(s) were found in the hostname, path, or query.`);
     indicators.push({
       category: "Content & Behavioral Signals",
       name: "High-Risk Phishing Keywords",
@@ -343,7 +349,7 @@ async function analyzeUrlLocally(rawInput: string) {
   // 7. Obfuscation / Special Characters
   const hasAtSymbol = cleanInput.includes("@");
   if (hasAtSymbol) {
-    threatScore += 35;
+    addRiskContribution("URL @-symbol obfuscation", 35, "The URL contains an @ symbol that can obscure the actual destination.");
     indicators.push({
       category: "Content & Behavioral Signals",
       name: "HTTP Basic Auth Spoofing ('@' Symbol)",
@@ -355,7 +361,7 @@ async function analyzeUrlLocally(rawInput: string) {
 
   // 8. Protocol & Port Anomalies
   if (protocol === "http:") {
-    threatScore += 15;
+    addRiskContribution("Unencrypted HTTP", 15, "The URL uses HTTP rather than HTTPS.");
     indicators.push({
       category: "SSL & Security Protocol",
       name: "Insecure HTTP Protocol",
@@ -374,7 +380,7 @@ async function analyzeUrlLocally(rawInput: string) {
   }
 
   if (parsed.port && parsed.port !== "80" && parsed.port !== "443") {
-    threatScore += 20;
+    addRiskContribution("Non-standard port", 20, `The URL specifies port ${parsed.port}.`);
     indicators.push({
       category: "Network & Structure",
       name: "Non-Standard Port",
@@ -387,7 +393,7 @@ async function analyzeUrlLocally(rawInput: string) {
   // 9. Shannon Entropy
   const domainEntropy = calculateEntropy(secondLevelDomain || hostname);
   if (domainEntropy > 3.8 && (secondLevelDomain || hostname).length > 10) {
-    threatScore += 20;
+    addRiskContribution("High domain entropy", 20, `The domain-name entropy is ${domainEntropy}, above the rule threshold of 3.8.`);
     indicators.push({
       category: "Domain Legitimacy",
       name: "High Domain Entropy (DGA Pattern)",
@@ -416,7 +422,7 @@ async function analyzeUrlLocally(rawInput: string) {
       severity: "none",
     });
   } catch (err: any) {
-    threatScore += 30;
+    addRiskContribution("DNS resolution failure", 30, "The hostname did not resolve to an active IP during this scan.");
     indicators.push({
       category: "DNS & Infrastructure",
       name: "DNS Resolution Failure",
@@ -457,7 +463,7 @@ async function analyzeUrlLocally(rawInput: string) {
         const normFinalHost = finalUrl.hostname.replace(/^www\./, "");
         const normInitHost = hostname.replace(/^www\./, "");
         if (normFinalHost !== normInitHost) {
-          threatScore += 25;
+          addRiskContribution("Cross-domain redirection", 25, `The URL redirected to a different hostname (${finalUrl.hostname}).`);
           indicators.push({
             category: "Network & Structure",
             name: "Cross-Domain Redirection Cloaking",
@@ -473,23 +479,20 @@ async function analyzeUrlLocally(rawInput: string) {
   }
 
   // Cap threat score between 0 and 100
+  const ruleScore = threatScore;
   threatScore = Math.min(100, Math.max(0, threatScore));
 
   // Determine Verdict
-  let verdict: "SAFE" | "LOW_RISK" | "SUSPICIOUS" | "MALICIOUS" = "SAFE";
+  let verdict = verdictForScore(threatScore);
   let threatLevel = "Safe / Legitimate";
 
-  if (threatScore >= 70) {
-    verdict = "MALICIOUS";
+  if (verdict === "MALICIOUS") {
     threatLevel = "Dangerous Phishing Threat";
-  } else if (threatScore >= 45) {
-    verdict = "SUSPICIOUS";
+  } else if (verdict === "SUSPICIOUS") {
     threatLevel = "Suspicious Link";
-  } else if (threatScore >= 20) {
-    verdict = "LOW_RISK";
+  } else if (verdict === "LOW_RISK") {
     threatLevel = "Low Risk / Exercise Caution";
   } else {
-    verdict = "SAFE";
     threatLevel = "Clean / No Known Threats";
     if (threatType === "Clean Webpage") threatType = "Verified Safe Destination";
   }
@@ -543,6 +546,7 @@ async function analyzeUrlLocally(rawInput: string) {
       keywordsFound,
       hasObfuscatedChars: hasAtSymbol,
     },
+    explanation: createXaiExplanation(ruleScore, threatScore, verdict, riskContributions),
   };
 }
 
@@ -633,12 +637,26 @@ app.post("/api/scan", async (req, res) => {
       aiAnalysis = await performGeminiThreatAnalysis(localScan);
     }
 
-    // If Gemini provided analysis, adjust threat score and summary dynamically
+    // Gemini can trigger the existing escalation policy, but is shown separately from rule contributions.
     if (aiAnalysis) {
       if (aiAnalysis.confidence > 80 && aiAnalysis.socialEngineeringTactics.length >= 2 && localScan.threatScore < 70) {
+        const scoreBeforeAi = localScan.threatScore;
         localScan.threatScore = Math.max(localScan.threatScore, 75);
         localScan.verdict = "MALICIOUS";
         localScan.threatLevel = "Dangerous Phishing Threat";
+        localScan.summary = "Gemini's high-confidence assessment identified multiple social-engineering tactics. Treat this link as malicious and do not open it or enter credentials.";
+        localScan.explanation = createXaiExplanation(
+          localScan.explanation.ruleScore,
+          localScan.threatScore,
+          localScan.verdict,
+          localScan.explanation.contributions,
+          {
+            from: scoreBeforeAi,
+            to: localScan.threatScore,
+            confidence: aiAnalysis.confidence,
+            tacticsCount: aiAnalysis.socialEngineeringTactics.length,
+          },
+        );
       }
     }
 
@@ -661,16 +679,25 @@ app.post("/api/check-batch", async (req, res) => {
       return res.status(400).json({ error: "Provide an array of URLs to scan." });
     }
     const cleanList = urls.slice(0, 5); // Limit batch to 5 for fast response
-    const results = await Promise.all(
+    const outcomes = await Promise.all(
       cleanList.map(async (u) => {
         try {
-          return await analyzeUrlLocally(u);
-        } catch {
-          return null;
+          return { result: await analyzeUrlLocally(u), error: null };
+        } catch (error) {
+          return {
+            result: null,
+            error: {
+              url: String(u),
+              message: error instanceof Error ? error.message : "Failed to analyze URL.",
+            },
+          };
         }
       })
     );
-    return res.json({ results: results.filter(Boolean) });
+    return res.json({
+      results: outcomes.flatMap((outcome) => (outcome.result ? [outcome.result] : [])),
+      errors: outcomes.flatMap((outcome) => (outcome.error ? [outcome.error] : [])),
+    });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }

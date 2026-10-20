@@ -45,6 +45,29 @@ export interface AiThreatAnalysis {
   confidence: number;
 }
 
+export interface RiskContribution {
+  feature: string;
+  points: number;
+  evidence: string;
+}
+
+export interface AiRiskAdjustment {
+  from: number;
+  to: number;
+  confidence: number;
+  tacticsCount: number;
+}
+
+export interface XaiExplanation {
+  method: "Weighted URL rules";
+  ruleScore: number;
+  scoreCap: 100;
+  finalScore: number;
+  verdictBasis: string;
+  contributions: RiskContribution[];
+  aiAdjustment: AiRiskAdjustment | null;
+}
+
 export interface ScanResult {
   id: string;
   url: string;
@@ -62,6 +85,7 @@ export interface ScanResult {
   networkInfo: NetworkInfo;
   heuristicDetails: HeuristicDetails;
   aiAnalysis: AiThreatAnalysis | null;
+  explanation?: XaiExplanation;
 }
 
 export interface ThreatCampaign {
